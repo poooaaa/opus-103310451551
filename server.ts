@@ -3,7 +3,6 @@ import path from "path";
 import fs from "fs";
 import axios from "axios";
 import qs from "qs";
-import { createServer as createViteServer } from "vite";
 
 // Define a structural interface for tasks
 interface DownloadTask {
@@ -602,12 +601,13 @@ async function startListener() {
   const PORT = 3000;
   // Vite development vs production router setup
   if (process.env.NODE_ENV !== "production") {
+    const { createServer: createViteServer } = await import("vite");
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: "spa"
     });
     app.use(vite.middlewares);
-  } else {
+  } else if (!process.env.VERCEL) {
     const distPath = path.join(process.cwd(), "dist");
     app.use(express.static(distPath));
     app.get("*", (req, res) => {
