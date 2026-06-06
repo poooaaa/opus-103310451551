@@ -1,0 +1,6 @@
+{
+  "name": "YouTube Video Downloader",
+  "description": "YouTube Video Downloader with high-performance MP4 API access and resolution auto-adjusting.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
