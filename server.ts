@@ -25,6 +25,59 @@ interface DownloadTask {
 
 const downloads: Record<string, DownloadTask> = {};
 
+function parseDurationToSeconds(duration: any): number {
+  if (duration === null || duration === undefined) return 0;
+  
+  if (typeof duration === "number") {
+    return duration;
+  }
+  
+  const str = String(duration).trim();
+  if (!str) return 0;
+
+  // If it's a pure number string, e.g. "360"
+  if (/^\d+$/.test(str)) {
+    return parseInt(str, 10);
+  }
+
+  // If it's in format HH:MM:SS or MM:SS or H:MM:SS etc.
+  if (/^(\d+:)?\d+:\d+$/.test(str)) {
+    const parts = str.split(":").map(p => parseInt(p, 10));
+    if (parts.length === 3) {
+      return (parts[0] || 0) * 3600 + (parts[1] || 0) * 60 + (parts[2] || 0);
+    } else if (parts.length === 2) {
+      return (parts[0] || 0) * 60 + (parts[1] || 0);
+    }
+  }
+
+  // Handle formats like "5m 12s", "1h 5m 12s" or simple "5m", "10 min", "10 menit", "1 jam"
+  let totalSeconds = 0;
+  
+  // Extract hours
+  const hrMatch = str.match(/(\d+)\s*(h|hr|hour|jam)/i);
+  if (hrMatch) {
+    totalSeconds += parseInt(hrMatch[1], 10) * 3600;
+  }
+  
+  // Extract minutes
+  const minMatch = str.match(/(\d+)\s*(m|min|minute|menit)/i);
+  if (minMatch) {
+    totalSeconds += parseInt(minMatch[1], 10) * 60;
+  }
+  
+  // Extract seconds
+  const secMatch = str.match(/(\d+)\s*(s|sec|second|detik)/i);
+  if (secMatch) {
+    totalSeconds += parseInt(secMatch[1], 10);
+  }
+
+  if (totalSeconds > 0) {
+    return totalSeconds;
+  }
+
+  return 0;
+}
+
 // Ensure downloads directory exists (support writable /tmp in serverless environments like Vercel)
 const DOWNLOADS_DIR = process.env.VERCEL
   ? "/tmp"
@@ -33,12 +86,12 @@ if (!fs.existsSync(DOWNLOADS_DIR)) {
   fs.mkdirSync(DOWNLOADS_DIR, { recursive: true });
 }
 
-// Function to clean up old downloads (older than 2 hours to conserve disk space)
+// Function to clean up old downloads (older than 30 minutes to conserve disk space)
 function cleanOldDownloads() {
-  const twoHours = 2 * 60 * 60 * 1000;
+  const thirtyMinutes = 30 * 60 * 1000;
   const now = Date.now();
   for (const id in downloads) {
-    if (now - downloads[id].createdAt > twoHours) {
+    if (now - downloads[id].createdAt > thirtyMinutes) {
       const task = downloads[id];
       if (task.filename) {
         const filePath = path.join(DOWNLOADS_DIR, task.filename);
@@ -57,8 +110,8 @@ function cleanOldDownloads() {
   }
 }
 
-// Clean up every 10 minutes
-setInterval(cleanOldDownloads, 10 * 60 * 1000);
+// Clean up every 5 minutes
+setInterval(cleanOldDownloads, 5 * 60 * 1000);
 
 // YouTube downloader integration function
 async function ytdown(url: string) {
@@ -112,6 +165,44 @@ function getResolutionHeight(item: any): number {
   return 0;
 }
 
+// Convert media size string (e.g. "44.69 MB" or "13.53 MB") to number (MB)
+function parseSizeToMB(sizeStr: string): number {
+  if (!sizeStr) return 0;
+  const str = sizeStr.trim().toLowerCase();
+  
+  const numMatch = str.match(/^([\d.]+)/);
+  if (!numMatch) return 0;
+  
+  const value = parseFloat(numMatch[1]);
+  if (isNaN(value)) return 0;
+  
+  if (str.includes("gb")) {
+    return value * 1024;
+  }
+  if (str.includes("kb")) {
+    return value / 1024;
+  }
+  return value;
+}
+
+// Extract the height integer from resolution strings
+function parseResolutionHeight(resStr: string): number {
+  if (!resStr) return 0;
+  const match = resStr.match(/(\d+)p/i);
+  if (match) return parseInt(match[1], 10);
+  const parts = resStr.split("x");
+  if (parts.length === 2) {
+    const h = parseInt(parts[1], 10);
+    if (!isNaN(h)) return h;
+  }
+  const digits = resStr.match(/\d+/);
+  if (digits) {
+    const h = parseInt(digits[0], 10);
+    if (!isNaN(h)) return h;
+  }
+  return 0;
+}
+
 export const app = express();
 
 // Trust upstream reverse proxy headers (e.g. Google Cloud Run routing headers)
@@ -120,10 +211,42 @@ app.set("trust proxy", true);
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
+  // Robust Video Range-Streaming Controller for direct HTML5 player on mobile/Safari/Chrome inside iframe
+  app.get("/downloads/:filename", (req, res, next) => {
+    const filename = req.params.filename;
+    if (!filename.endsWith(".mp4")) {
+      return next(); // Pass to express.static for other file formats
+    }
+    
+    // Prevent directory traversal
+    const safeFilename = path.basename(filename);
+    const filePath = path.join(DOWNLOADS_DIR, safeFilename);
+
+    if (!fs.existsSync(filePath)) {
+      return res.status(404).json({ error: "Berkas video tidak ditemukan di server (kemungkinan sudah dibersihkan)." });
+    }
+
+    // Set necessary streaming, buffer defeat, and CORS headers
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    res.setHeader("X-Accel-Buffering", "no"); // Prevent Nginx/Cloud Run buffer blocks
+    res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate");
+
+    // Express res.sendFile handles Range requests (HTTP 206) and chunk division perfectly
+    res.sendFile(filePath, (err) => {
+      if (err) {
+        if (res.headersSent) {
+          return;
+        }
+        next(err);
+      }
+    });
+  });
+
   // Serve downloads statically plain, letting Express stream with complete Byte Range capabilities
   app.use("/downloads", express.static(DOWNLOADS_DIR, {
     setHeaders: (res) => {
       res.setHeader("Access-Control-Allow-Origin", "*");
+      res.setHeader("X-Accel-Buffering", "no");
     }
   }));
 
@@ -145,6 +268,46 @@ app.use(express.urlencoded({ extended: true }));
     res.download(filePath, safeFilename);
   });
 
+  // API endpoint: Diagnose downloaded files and task stats
+  app.get("/api/diagnose", (req, res) => {
+    try {
+      const files = fs.readdirSync(DOWNLOADS_DIR);
+      const diagnostics = files.map((file) => {
+        const filePath = path.join(DOWNLOADS_DIR, file);
+        const stats = fs.statSync(filePath);
+        
+        // Read first 30 bytes to check the file header/magic signature
+        let magic = "";
+        try {
+          const fd = fs.openSync(filePath, "r");
+          const buffer = Buffer.alloc(30);
+          const bytesRead = fs.readSync(fd, buffer, 0, 30, 0);
+          fs.closeSync(fd);
+          magic = buffer.subarray(0, bytesRead).toString("hex") + ` (Text: ${buffer.subarray(0, bytesRead).toString("utf8").replace(/[^\x20-\x7E]/g, ".")})`;
+        } catch (e: any) {
+          magic = "Error reading header: " + e.message;
+        }
+
+        return {
+          filename: file,
+          sizeOnDiskBytes: stats.size,
+          sizeOnDiskReadable: `${(stats.size / (1024 * 1024)).toFixed(2)} MB`,
+          mtime: stats.mtime,
+          magicHeader: magic
+        };
+      });
+
+      res.json({
+        downloadsDir: DOWNLOADS_DIR,
+        tasksCount: Object.keys(downloads).length,
+        tasks: downloads,
+        files: diagnostics
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: "Gagal mendiagnosis: " + err.message });
+    }
+  });
+
   // API endpoint: Fetch Youtube video info
   app.post("/api/fetch-info", async (req, res) => {
     try {
@@ -163,6 +326,14 @@ app.use(express.urlencoded({ extended: true }));
       }
 
       const apiInfo = rawResult.api;
+      const durationStr = apiInfo.mediaStats ? apiInfo.mediaStats.duration : "";
+      const durationSeconds = parseDurationToSeconds(durationStr);
+      if (durationSeconds > 600) {
+        return res.status(400).json({ 
+          error: `Video ini berdurasi ${durationStr || "lebih dari 10 menit"}. Batas maksimal durasi video yang diperbolehkan saat ini adalah 10 menit!` 
+        });
+      }
+
       const mediaItems = apiInfo.mediaItems || [];
 
       // Filter only video elements
@@ -174,25 +345,41 @@ app.use(express.urlencoded({ extended: true }));
       // Filter other media formats (MP3/Audio)
       const audios = mediaItems.filter((item: any) => item.type === "Audio");
 
-      // Resolution Selection Engine:
-      // Preference: 720p. Fallback: highest below 720p (480p/360p/etc).
-      let selectedOption = videos.find((v: any) => getResolutionHeight(v) === 720);
+      // Set disabled property to true if format is > 480p and size > 30MB
+      const processedVideos = videos.map((v: any) => {
+        const height = getResolutionHeight(v);
+        const sizeMB = parseSizeToMB(v.mediaFileSize);
+        const disabled = height > 480 && sizeMB > 30;
+        return {
+          ...v,
+          height,
+          disabled,
+          limitReason: disabled ? `Dibatasi: Ukuran (${sizeMB.toFixed(1)}MB) di atas 30MB, kualitas maks 480p` : undefined
+        };
+      });
+
+      // Deciding the candidates for auto selection (only those that are NOT disabled)
+      const activeCandidates = processedVideos.filter((v: any) => !v.disabled);
+
+      // Resolution Selection Engine based strictly on permitted candidates:
+      // Preference: 720p (if permitted). Fallback: highest below 720p (480p/360p/etc).
+      let selectedOption = activeCandidates.find((v: any) => v.height === 720);
       let matchType = "720p (Sesuai Preferensi)";
 
       if (!selectedOption) {
         // Sort descending to get the highest format that is less than 720p
-        const sub720 = videos
-          .filter((v: any) => getResolutionHeight(v) < 720)
-          .sort((a: any, b: any) => getResolutionHeight(b) - getResolutionHeight(a));
+        const sub720 = activeCandidates
+          .filter((v: any) => v.height < 720)
+          .sort((a: any, b: any) => b.height - a.height);
 
         if (sub720.length > 0) {
           selectedOption = sub720[0];
-          matchType = `Menyesuaikan ke resolusi di bawahnya (${getResolutionHeight(selectedOption)}p)`;
+          matchType = `Menyesuaikan ke resolusi di bawahnya (${selectedOption.height}p) - Batas 30MB`;
         } else {
-          // If all videos are above 720p, pick the lowest of them to conserve bandwidth
-          const allVideosSorted = videos.sort((a: any, b: any) => getResolutionHeight(a) - getResolutionHeight(b));
+          // If no permitted videos, pick the lowest of all videos as safety fallback
+          const allVideosSorted = processedVideos.sort((a: any, b: any) => a.height - b.height);
           selectedOption = allVideosSorted[0];
-          matchType = `Menyesuaikan ke resolusi terendah (${getResolutionHeight(selectedOption)}p)`;
+          matchType = `Menyesuaikan ke resolusi terendah (${selectedOption.height}p)`;
         }
       }
 
@@ -202,15 +389,11 @@ app.use(express.urlencoded({ extended: true }));
         thumbnail: apiInfo.imagePreviewUrl || (apiInfo.userInfo ? apiInfo.userInfo.avatar : ""),
         duration: apiInfo.mediaStats ? apiInfo.mediaStats.duration : "Unknown",
         formats: {
-          videos: videos.map((v: any) => ({
-            ...v,
-            height: getResolutionHeight(v)
-          })),
+          videos: processedVideos,
           audios: audios
         },
         autoSelected: {
           ...selectedOption,
-          height: getResolutionHeight(selectedOption),
           matchType
         }
       });
@@ -332,26 +515,44 @@ app.use(express.urlencoded({ extended: true }));
       }
 
       const apiInfo = rawResult.api;
+      const durationStr = apiInfo.mediaStats ? apiInfo.mediaStats.duration : "";
+      const durationSeconds = parseDurationToSeconds(durationStr);
+      if (durationSeconds > 600) {
+        return res.status(400).json({ 
+          status: "error",
+          error: `Video ini berdurasi ${durationStr || "lebih dari 10 menit"}. Batas maksimal durasi video yang diperbolehkan saat ini adalah 10 menit!` 
+        });
+      }
+
       const mediaItems = apiInfo.mediaItems || [];
       const videos = mediaItems.filter((item: any) => item.type === "Video");
       if (videos.length === 0) {
         return res.status(400).json({ status: "error", error: "Tidak ditemukan format video yang didukung." });
       }
 
+      // Filter out video options > 480p and > 30MB
+      const activeResolves = videos.filter((v: any) => {
+        const height = getResolutionHeight(v);
+        const sizeMB = parseSizeToMB(v.mediaFileSize);
+        return !(height > 480 && sizeMB > 30);
+      });
+
+      const selectableVideos = activeResolves.length > 0 ? activeResolves : videos;
+
       // Resolution Selection Engine (Prefer 720p)
-      let selectedOption = videos.find((v: any) => getResolutionHeight(v) === 720);
+      let selectedOption = selectableVideos.find((v: any) => getResolutionHeight(v) === 720);
       let matchType = "720p (Sesuai Preferensi)";
 
       if (!selectedOption) {
-        const sub720 = videos
+        const sub720 = selectableVideos
           .filter((v: any) => getResolutionHeight(v) < 720)
           .sort((a: any, b: any) => getResolutionHeight(b) - getResolutionHeight(a));
 
         if (sub720.length > 0) {
           selectedOption = sub720[0];
-          matchType = `${getResolutionHeight(selectedOption)}p (Menyesuaikan resolusi bawah)`;
+          matchType = `${getResolutionHeight(selectedOption)}p (Menyesuaikan resolusi bawah) - Batas 30MB`;
         } else {
-          const allVideosSorted = videos.sort((a: any, b: any) => getResolutionHeight(a) - getResolutionHeight(b));
+          const allVideosSorted = selectableVideos.sort((a: any, b: any) => getResolutionHeight(a) - getResolutionHeight(b));
           selectedOption = allVideosSorted[0];
           matchType = `${getResolutionHeight(selectedOption)}p (Resolusi minimal tersedia)`;
         }
@@ -534,12 +735,18 @@ app.use(express.urlencoded({ extended: true }));
         method: "GET",
         url: realDownloadUrl,
         responseType: "stream",
+        timeout: 120000, // 2 minutes timeout
         headers: {
           "User-Agent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Mobile Safari/537.36",
           "Referer": "https://app.ytdown.to/",
           "Origin": "https://app.ytdown.to"
         }
       });
+
+      const contentType = response.headers["content-type"] || "";
+      if (contentType.toString().includes("text/html") || contentType.toString().includes("application/json")) {
+        throw new Error(`Server konversi memberikan respon yang salah (Tipe Konten: ${contentType}). Kemungkinan tautan telah kedaluwarsa atau diblokir. Silakan coba lagi!`);
+      }
 
       const contentLengthHeader = response.headers["content-length"];
       let totalBytes = 0;
@@ -549,6 +756,17 @@ app.use(express.urlencoded({ extended: true }));
         totalBytes = contentLengthHeader;
       }
       task.totalBytes = totalBytes;
+
+      // 30MB size constraint guard for resolutions higher than 480p
+      if (totalBytes > 31457280) { // 30MB in bytes
+        const height = parseResolutionHeight(task.resolution);
+        if (height > 480) {
+          console.error(`[Guard] Blocked task ${taskId} downloading ${task.resolution} because actual size (${totalBytes} bytes) exceeds 30MB.`);
+          task.status = "error";
+          task.error = `Berkas video asli berukuran ${(totalBytes / (1024 * 1024)).toFixed(1)}MB (melebihi batas 30MB). Kualitas video dengan ukuran di atas 30MB dibatasi maksimal 480p! Silakan pilih kualitas format 480p atau di bawahnya.`;
+          return; // Terminate download early before writing to disk
+        }
+      }
 
       const writer = fs.createWriteStream(filePath);
       response.data.pipe(writer);
@@ -575,6 +793,30 @@ app.use(express.urlencoded({ extended: true }));
       });
 
       writer.on("finish", () => {
+        // Double check actual size written on disk
+        let sizeOnDisk = 0;
+        try {
+          sizeOnDisk = fs.statSync(filePath).size;
+        } catch (_) {}
+
+        console.log(`[Downloader] Task ${taskId} finish event. totalBytes: ${totalBytes}, downloadedBytes: ${downloadedBytes}, sizeOnDisk: ${sizeOnDisk}`);
+
+        if (totalBytes > 0 && sizeOnDisk < totalBytes) {
+          console.error(`[Downloader] Task ${taskId} is incomplete! Only downloaded ${sizeOnDisk} of ${totalBytes} bytes.`);
+          task.status = "error";
+          task.error = `Koneksi terputus: File tidak lengkap (${sizeOnDisk} dari ${totalBytes} byte terunduh). Silakan jalankan ulang unduhan!`;
+          try { fs.unlinkSync(filePath); } catch (_) {}
+          return;
+        }
+
+        if (sizeOnDisk < 1000) {
+          console.error(`[Downloader] Task ${taskId} downloaded file is too small! sizeOnDisk: ${sizeOnDisk}`);
+          task.status = "error";
+          task.error = "File hasil unduhan rusak/terlalu kecil. Silakan coba lagi!";
+          try { fs.unlinkSync(filePath); } catch (_) {}
+          return;
+        }
+
         console.log(`[Downloader] Task ${taskId} completed successfully!`);
         task.status = "completed";
         task.progress = 100;

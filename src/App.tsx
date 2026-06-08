@@ -410,7 +410,6 @@ export default function App() {
                       src={taskProgress.localUrl}
                       controls
                       playsInline
-                      poster={videoInfo.thumbnail}
                       className="w-full h-full object-contain bg-black"
                     />
                   ) : (
@@ -561,6 +560,11 @@ export default function App() {
                     <p className="text-xs text-slate-300 leading-relaxed">
                       Sistem mendeteksi format video dan memilih:{" "}
                       <strong className="text-red-400">{videoInfo.autoSelected.matchType}</strong>.
+                      {videoInfo.formats.videos.some(v => v.disabled) && (
+                        <span className="block mt-1.5 text-[11px] text-amber-500 font-medium leading-relaxed">
+                          ⚠️ Beberapa format resolusi tinggi dinonaktifkan karena ukuran file melebihi batas 30MB. Sesuai ketentuan, video di atas 30MB dibatasi maksimal kualitas 480p.
+                        </span>
+                      )}
                     </p>
                     <div className="text-[11px] text-slate-400 flex items-center gap-1 pt-1 font-mono">
                       <CornerDownRight className="w-3.5 h-3.5 text-red-500 shrink-0" />
@@ -716,17 +720,22 @@ export default function App() {
                           <div 
                             key={index} 
                             className={`py-3.5 flex items-center justify-between gap-4 first:pt-0 last:pb-0 transition-colors ${
-                              isActive ? "text-white" : "text-slate-300"
+                              format.disabled ? "opacity-40" : isActive ? "text-white" : "text-slate-300"
                             }`}
                           >
                             <div className="space-y-1">
-                              <div className="flex items-center gap-2">
-                                <span className="font-extrabold text-sm font-mono text-white">
+                              <div className="flex flex-wrap items-center gap-2">
+                                <span className={`font-extrabold text-sm font-mono ${format.disabled ? "text-slate-500 line-through" : "text-white"}`}>
                                   {format.mediaRes || `${format.height}p`}
                                 </span>
-                                {isAuto && (
-                                  <span className="px-1.5 py-0.2 bg-red-600/10 border border-red-500/20 text-red-400 text-[9px] font-bold tracking-wide rounded">
-                                    AUTO 720P PREFERENCE
+                                {isAuto && !format.disabled && (
+                                  <span className="px-1.5 py-0.2 bg-red-600/10 border border-red-500/20 text-red-400 text-[9px] font-bold tracking-wide rounded uppercase">
+                                    AUTO SELECT
+                                  </span>
+                                )}
+                                {format.disabled && (
+                                  <span className="px-1.5 py-0.2 bg-amber-500/10 border border-amber-500/20 text-amber-500 text-[9px] font-bold tracking-wide rounded uppercase">
+                                    DIBATASI (&gt; 30MB)
                                   </span>
                                 )}
                                 {format.mediaQuality && (
@@ -735,15 +744,26 @@ export default function App() {
                                   </span>
                                 )}
                               </div>
-                              <p className="text-xs text-slate-400 flex items-center gap-1.5 font-mono">
-                                <span>Ukuran: {format.mediaFileSize || "Tidak tersedia"}</span>
+                              <p className="text-xs text-slate-400 flex flex-wrap items-center gap-1.5 font-mono">
+                                <span className={format.disabled ? "text-amber-500/80 font-semibold" : ""}>
+                                  Ukuran: {format.mediaFileSize || "Tidak tersedia"}
+                                </span>
                                 <span className="text-slate-700">•</span>
                                 <span>Tipe: {format.mediaExtension}</span>
                               </p>
+                              {format.disabled && (
+                                <p className="text-[10px] text-amber-500 leading-normal font-medium">
+                                  {format.limitReason}
+                                </p>
+                              )}
                             </div>
 
-                            <div className="flex items-center gap-1.5">
-                              {isActive ? (
+                            <div className="flex items-center gap-1.5 shrink-0">
+                              {format.disabled ? (
+                                <span className="px-3.5 py-1.5 bg-slate-900/60 border border-slate-800/40 text-slate-500 rounded-lg text-xs font-bold font-mono cursor-not-allowed uppercase select-none">
+                                  LOCKED
+                                </span>
+                              ) : isActive ? (
                                 <button
                                   type="button"
                                   onClick={() => handleStartDownload(format)}
@@ -757,7 +777,6 @@ export default function App() {
                                   type="button"
                                   onClick={() => {
                                     setSelectedFormat(format);
-                                    // Soft scroll reset to view information details nicely
                                   }}
                                   className="px-3.5 py-1.5 bg-slate-950 hover:bg-slate-800 text-slate-300 border border-slate-800 rounded-lg text-xs font-semibold transition-all"
                                 >

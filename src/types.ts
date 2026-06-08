@@ -12,6 +12,8 @@ export interface VideoFormat {
   mediaFileSize: string;
   mediaTask: string;
   height?: number;
+  disabled?: boolean;
+  limitReason?: string;
 }
 
 export interface AudioFormat {
